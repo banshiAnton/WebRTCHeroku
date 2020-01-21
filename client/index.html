@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>WebRTC</title>
+    <style>
+        div {
+            display: flex;
+            flex-direction: column;
+        }
+
+        button {
+            font-size: 20px;
+            width: 70px;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <video width="400" height="auto" id="local" autoplay></video>
+        <video width="400" height="auto" id="remote" autoplay></video>
+        <button id="call">Call</button>
+    </div>
+    <script>
+        const peer = new RTCPeerConnection();
+
+        const clientID = uuid();
+
+        const localVideo = document.getElementById('local');
+        const remoteVideo = document.getElementById('remote');
+        const btnCall = document.getElementById('call');
+
+        btnCall.onclick = call;
+
+        console.log('[elems]', localVideo, remoteVideo)
+        const HOST = location.origin.replace(/^http/, 'ws')
+        console.log('[HOST]', HOST)
+        const socket = new WebSocket(`${HOST}/${clientID}`);
+        socket.onopen = function() {
+            console.log('[open]', arguments);
+            this._clientID = clientID;
+        }
+        socket.onmessage = onmessage;
+
+        function uuid() {
+            return Math.random().toString(16).slice(10);
+        }
+
+        navigator
+        .mediaDevices
+        .getUserMedia({ audio: false, video: true })
+        .then(localStream => {
+            localVideo.srcObject = localStream;
+            peer.addStream(localStream)
+        })
+
+        peer.onicecandidate = function(e) {
+            if (e.candidate) {
+                console.log('[onicecandidate]', e.candidate)
+                socket.send(JSON.stringify({
+                    type: 'ice',
+                    ice: e.candidate
+                }));
+            }
+        }
+
+        peer.ontrack = e => {
+            console.warn('[STREEAMS]', e.streams)
+            remoteVideo.srcObject = e.streams[0];
+        }
+
+        function call() {
+            peer.createOffer().then(offer => {
+                console.log('[offer]', offer)
+                peer.setLocalDescription(new RTCSessionDescription(offer))
+                return peer.localDescription
+            })
+            .then(localDesc => {
+                console.log('[localDesc]', localDesc)
+                socket.send(JSON.stringify(localDesc))
+            })
+        }
+
+        function onmessage({ data }) {
+            const message = JSON.parse(data);
+            console.log('[onmessage]', clientID, message)
+            if (message.type === 'offer') {
+                peer.setRemoteDescription(message)
+                peer.createAnswer().then(answer => {
+                    console.log('[answer]', answer)
+                    peer.setLocalDescription(new RTCSessionDescription(answer))
+                    return peer.localDescription
+                })
+                .then(localDesc => {
+                    console.log('[localDesc][answer]', localDesc)
+                    socket.send(JSON.stringify(localDesc))
+                })
+                console.warn('[GET OFFER]')
+            }
+            if (message.type === 'answer') {
+                peer.setRemoteDescription(message)
+                console.warn('[GET ANSWER]')
+            }
+            if (message.type === 'ice') {
+                peer.addIceCandidate(message.ice)
+                console.warn('[GET ICE]')
+            }
+        }
+    </script>
+</body>
+</html>
