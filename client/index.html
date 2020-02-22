@@ -51,7 +51,7 @@
 
         navigator
         .mediaDevices
-        .getUserMedia({ audio: true, video: true })
+        .getUserMedia({ audio: false, video: true })
         .then(localStream => {
             localVideo.srcObject = localStream;
             peer.addStream(localStream)
