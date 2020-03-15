@@ -29,7 +29,7 @@ wss.on('connection', function(ws, req) {
 
 function onClose() {
     console.log('[close]', this.user_id, delete sockets[this.user_id])
-    console.log('[wsStore]', Object.keys(sockets))
+    console.log('[scokets]', Object.keys(sockets))
 }
 
 

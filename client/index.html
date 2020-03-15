@@ -66,15 +66,18 @@
 
         getLocalStream().then(localStream => appendStrema(localStream))
 
-        function callToUser(user_id) {
+        function callToUser(user_id, otherUsersIds) {
             const peer = new UserPeer(+user_id)
             peers[user_id] = peer
-            peer.initCall(user_id)
+            peer.initCall(otherUsersIds)
         }
 
         async function makeCallToAllOnlineUsers() {
             const list = await getListOfOnlineUsers()
-            list.forEach(user_id => callToUser(+user_id));
+            list.forEach(user_id => {
+                const otherUsersIds = list.filter(_user_id => _user_id != user_id)
+                callToUser(+user_id, otherUsersIds)
+            })
         }
 
         async function getListOfOnlineUsers() {
@@ -93,7 +96,7 @@
             }
             switch(type) {
                 case MESSAGE_TYPES.OFFER:
-                    onIncomingCall(user_id, message['sdp'])
+                    onIncomingCall(user_id, message)
                     break;
                 case MESSAGE_TYPES.ANSWER:
                     onAnswer(user_id, message['sdp'])
@@ -106,14 +109,27 @@
             }
         }
 
-        async function onIncomingCall(user_id, sdp) {
+        async function onIncomingCall(user_id, message) {
             if (peers[user_id]) {
                 return;
             }
+            const sdp = message['sdp']
             const peer = new UserPeer(+user_id)
             peers[user_id] = peer
             await peer.setUpPeer()
             await peer.onIncomingCall(sdp)
+
+            const otherUserIds = message['otherUserIds']
+            if (!otherUserIds) {
+                return;
+            }
+            makeCallToOtherUser(otherUserIds)
+        }
+
+        function makeCallToOtherUser(otherUserIds) {
+            otherUserIds
+            .filter(user_id => clientID > +user_id)
+            .forEach(user_id => callToUser(user_id, []))
         }
 
         async function onAnswer(user_id, sdp) {
@@ -171,25 +187,27 @@
                 }
             }
 
-            async initCall() {
+            async initCall(otherUserIds) {
                 await this.setUpPeer()
-                return this.createOffer()
+                return this.createOffer(otherUserIds)
             }
 
             async onIncomingCall(sdp) {
                 await this.onReceiveRawOffer(sdp)
             }
 
-            async createOffer() {
+            async createOffer(otherUserIds) {
                 const offer = await this.peer.createOffer()
                 await this.peer.setLocalDescription(offer)
-                socket.send(JSON.stringify(
-                    {
+                const message = {
                         type: MESSAGE_TYPES.OFFER,
                         sdp: offer.sdp,
                         user_id: this.user_id
                     }
-                ));
+                if (otherUserIds.length > 0) {
+                    message['otherUserIds'] = otherUserIds;
+                }
+                socket.send(JSON.stringify(message));
             }
 
             async createAnswer(offer) {
