@@ -7,37 +7,48 @@ const app = express();
 
 app.use(express.static(path.resolve(__dirname, '../client/')))
 
+app.get('/listOfOnlineParticipants', (req, res, next) => {
+    const list = getListOfOnlineParticipants();
+    res.send({ list })
+})
+
 const server = http.createServer(app)
 const wss = new WebSocket.Server({ server })
 
-const wsStore = {}
+const sockets = {}
 
 wss.on('connection', function(ws, req) {
-    const wsClientID = req.url.slice(1)
-    ws._clientID = wsClientID
-    wsStore[wsClientID] = ws
-    ws.on('message', onmessage)
-    ws.on('close', function() {
-        console.log('[close]', this._clientID, delete wsStore[this._clientID])
-        console.log('[wsStore]', Object.keys(wsStore))
-    })
-    console.log('[connect]', wsClientID)
-    console.log('[wsStore]', Object.keys(wsStore))
+    const user_id = +req.url.slice(1)
+    ws.user_id = user_id
+    sockets[user_id] = ws
+    ws.on('message', onMessage)
+    ws.on('close', onClose)
+    console.log('[connect]', user_id)
+    console.log('[wsStore]', Object.keys(sockets))
 })
 
+function onClose() {
+    console.log('[close]', this.user_id, delete sockets[this.user_id])
+    console.log('[wsStore]', Object.keys(sockets))
+}
 
-function onmessage(message) {
+
+function onMessage(message) {
     const messageParsed = JSON.parse(message)
-    console.log('[onmessage]', this._clientID, messageParsed)
-    const participant = getParticipant(this._clientID)
+    onSingalMessage.call(this, messageParsed)
+}
+
+function onSingalMessage(message) {
+    const participant = sockets[message.user_id]
     if (participant) {
-        participant.send(message)
+        message.user_id = this.user_id
+        participant.send(JSON.stringify(message))
     }
 }
 
-function getParticipant(currentClientID) {
-    const participantID = Object.keys(wsStore).find(id => id != currentClientID);
-    return wsStore[participantID]
+function getListOfOnlineParticipants() {
+    const listOfOnlineParticipants = Object.keys(sockets).map(user_id => +user_id);
+    return listOfOnlineParticipants;
 }
 
 server.listen(process.env.PORT || 8080)

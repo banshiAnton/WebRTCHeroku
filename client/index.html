@@ -8,7 +8,7 @@
     <style>
         div {
             display: flex;
-            flex-direction: column;
+            flex-direction: row;
         }
 
         button {
@@ -18,96 +18,214 @@
     </style>
 </head>
 <body>
-    <div>
-        <video width="400" height="auto" id="local" autoplay></video>
-        <video width="400" height="auto" id="remote" autoplay></video>
-        <button id="call">Call</button>
+    <div id="streams">
     </div>
+    <button id="call">Call</button>
     <script>
+        const peers = {}
+        let localStream = null
         const pc_config = {"iceServers": [{"url": "stun:stun.l.google.com:19302"}]};
-        const peer = new RTCPeerConnection(pc_config);
+        const MESSAGE_TYPES = Object.create(null)
+        MESSAGE_TYPES.OFFER = 2
+        MESSAGE_TYPES.ANSWER = 3
+        MESSAGE_TYPES.HANG_UP = 4
+        MESSAGE_TYPES.CANDIDATE = 5
+
+        const streamsContainer = document.getElementById('streams');
+        const btnCall = document.getElementById('call');
+        btnCall.onclick = makeCallToAllOnlineUsers;
+
+        function uuid() {
+            return +(Math.random() * 10000).toFixed(0);
+        }
+
+        function appendStrema(stream) {
+            const video = document.createElement('video')
+            video.style.width = "400px"
+            video.style.height = "300px"
+            video.srcObject = stream;
+            video.setAttribute('autoplay', true)
+            streamsContainer.appendChild(video)
+        }
+
+        function getLocalStream() {
+            if (!localStream) {
+                return navigator
+                .mediaDevices
+                .getUserMedia({ audio: true, video: true })
+                .then(_localStream => localStream = _localStream)
+            }
+            return Promise.resolve(localStream);
+        }
 
         const clientID = uuid();
-
-        const localVideo = document.getElementById('local');
-        const remoteVideo = document.getElementById('remote');
-        const btnCall = document.getElementById('call');
-
-        btnCall.onclick = call;
-
-        console.log('[elems]', localVideo, remoteVideo)
         const HOST = location.origin.replace(/^http/, 'ws')
         console.log('[HOST]', HOST)
         const socket = new WebSocket(`${HOST}/${clientID}`);
-        socket.onopen = function() {
-            console.log('[open]', arguments);
-            this._clientID = clientID;
-        }
         socket.onmessage = onmessage;
 
-        function uuid() {
-            return Math.random().toString(16).slice(10);
+        getLocalStream().then(localStream => appendStrema(localStream))
+
+        function callToUser(user_id) {
+            const peer = new UserPeer(+user_id)
+            peers[user_id] = peer
+            peer.initCall(user_id)
         }
 
-        navigator
-        .mediaDevices
-        .getUserMedia({ audio: true, video: true })
-        .then(localStream => {
-            localVideo.srcObject = localStream;
-            peer.addStream(localStream)
-        })
-
-        peer.onicecandidate = function(e) {
-            if (e.candidate) {
-                console.log('[onicecandidate]', e.candidate)
-                socket.send(JSON.stringify({
-                    type: 'ice',
-                    ice: e.candidate
-                }));
-            }
+        async function makeCallToAllOnlineUsers() {
+            const list = await getListOfOnlineUsers()
+            list.forEach(user_id => callToUser(+user_id));
         }
 
-        peer.ontrack = e => {
-            console.warn('[STREEAMS]', e.streams)
-            remoteVideo.srcObject = e.streams[0];
-        }
-
-        function call() {
-            peer.createOffer().then(offer => {
-                console.log('[offer]', offer)
-                peer.setLocalDescription(new RTCSessionDescription(offer))
-                return peer.localDescription
-            })
-            .then(localDesc => {
-                console.log('[localDesc]', localDesc)
-                socket.send(JSON.stringify(localDesc))
-            })
+        async function getListOfOnlineUsers() {
+            const responce = await fetch(`${location.origin}/listOfOnlineParticipants`)
+            const {list} = await responce.json()
+            return list.filter(user_id => user_id != clientID)
         }
 
         function onmessage({ data }) {
             const message = JSON.parse(data);
             console.log('[onmessage]', clientID, message)
-            if (message.type === 'offer') {
-                peer.setRemoteDescription(message)
-                peer.createAnswer().then(answer => {
-                    console.log('[answer]', answer)
-                    peer.setLocalDescription(new RTCSessionDescription(answer))
-                    return peer.localDescription
-                })
-                .then(localDesc => {
-                    console.log('[localDesc][answer]', localDesc)
-                    socket.send(JSON.stringify(localDesc))
-                })
-                console.warn('[GET OFFER]')
+            const type = message.type
+            const user_id = +message.user_id
+            if (!user_id) {
+                return;
             }
-            if (message.type === 'answer') {
-                peer.setRemoteDescription(message)
-                console.warn('[GET ANSWER]')
+            switch(type) {
+                case MESSAGE_TYPES.OFFER:
+                    onIncomingCall(user_id, message['sdp'])
+                    break;
+                case MESSAGE_TYPES.ANSWER:
+                    onAnswer(user_id, message['sdp'])
+                    break;
+                case MESSAGE_TYPES.CANDIDATE:
+                    onIceCandidate(user_id, message)
+                    break;
+                default:
+                    return;
             }
-            if (message.type === 'ice') {
-                peer.addIceCandidate(message.ice)
-                console.warn('[GET ICE]')
+        }
+
+        async function onIncomingCall(user_id, sdp) {
+            if (peers[user_id]) {
+                return;
             }
+            const peer = new UserPeer(+user_id)
+            peers[user_id] = peer
+            await peer.setUpPeer()
+            await peer.onIncomingCall(sdp)
+        }
+
+        async function onAnswer(user_id, sdp) {
+            if (!peers[user_id]) {
+                return;
+            }
+            const peer = peers[user_id]
+            await peer.onReceiveRawAnswer(sdp)
+        }
+
+        function onIceCandidate(user_id, iceMessage) {
+            if (!peers[user_id]) {
+                return;
+            }
+            const peer = peers[user_id]
+            peer.onReceiveRawIceCandidate(iceMessage)
+        }
+
+        class UserPeer {
+            constructor(user_id) {
+                this.user_id = user_id
+            }
+
+            async setUpPeer() {
+                this.peer = new RTCPeerConnection(pc_config)
+                const localStream = await getLocalStream()
+                this.peer.addStream(localStream)
+                this.peer.ontrack = this.onRemoteStream
+                this.peer.onicecandidate = this.onIceCandidate.bind(this)
+            }
+
+            onRemoteStream(e) {
+                console.warn('[onRemoteStream]', e.streams[0])
+                if (this.remoteStream) {
+                    return;
+                }
+                const remoteStream = this.remoteStream = e.streams[0];
+                appendStrema(remoteStream)
+            }
+
+            onIceCandidate(e) {
+                if (e.candidate) {
+                    const candidate = e.candidate
+                    const iceCandidate = {
+                        candidate: candidate['candidate'],
+                        sdpMid: candidate['sdpMid'],
+                        sdpMLineIndex: candidate['sdpMLineIndex']
+                    }
+                    const message = JSON.stringify({
+                        ...iceCandidate,
+                        type: MESSAGE_TYPES.CANDIDATE,
+                        user_id: this.user_id
+                    })
+                    socket.send(message);
+                }
+            }
+
+            async initCall() {
+                await this.setUpPeer()
+                return this.createOffer()
+            }
+
+            async onIncomingCall(sdp) {
+                await this.onReceiveRawOffer(sdp)
+            }
+
+            async createOffer() {
+                const offer = await this.peer.createOffer()
+                await this.peer.setLocalDescription(offer)
+                socket.send(JSON.stringify(
+                    {
+                        type: MESSAGE_TYPES.OFFER,
+                        sdp: offer.sdp,
+                        user_id: this.user_id
+                    }
+                ));
+            }
+
+            async createAnswer(offer) {
+                this.peer.setRemoteDescription(offer)
+                const answer = await this.peer.createAnswer()
+                await this.peer.setLocalDescription(answer)
+                socket.send(JSON.stringify(
+                    {
+                        type: MESSAGE_TYPES.ANSWER,
+                        sdp: answer.sdp,
+                        user_id: this.user_id
+                    }
+                ));
+            }
+
+            onReceiveRawOffer(sdp) {
+                const offer = new RTCSessionDescription({sdp, type: 'offer'})
+                return this.createAnswer(offer)
+            }
+
+            onReceiveRawAnswer(sdp) {
+                console.warn('[offer sdp]', {sdp, type: 'answer'})
+                const answer = new RTCSessionDescription({sdp, type: 'answer'})
+                console.warn('[answer]', answer)
+                return this.peer.setRemoteDescription(answer)
+            }
+
+            onReceiveRawIceCandidate(iceMessage) {
+                const iceCandidate = {
+                    candidate: iceMessage['candidate'],
+                    sdpMid: iceMessage['sdpMid'],
+                    sdpMLineIndex: iceMessage['sdpMLineIndex']
+                }
+                this.peer.addIceCandidate(iceCandidate)
+            }
+            
         }
     </script>
 </body>
